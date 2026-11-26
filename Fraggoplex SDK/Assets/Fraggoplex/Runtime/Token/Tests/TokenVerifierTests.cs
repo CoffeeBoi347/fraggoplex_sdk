@@ -1,5 +1,7 @@
 using Fraggoplex.SDK;
+using System;
 using System.Collections.Generic;
+using System.Security.Cryptography;
 using UnityEngine;
 
 public class TokenVerifierTests : MonoBehaviour
@@ -52,5 +54,35 @@ public class TokenVerifierTests : MonoBehaviour
         }
 
         Debug.Log($"=== Test Run Complete. Passed: {passed}, Failed: {failed} ===");
+    }
+
+    public static RSA KeyFrom(KeyEntry key)
+    {
+        if (key == null)
+            throw new ArgumentNullException(nameof(key));
+
+        if (string.IsNullOrWhiteSpace(key.n) || string.IsNullOrWhiteSpace(key.e))
+        {
+            throw new ArgumentException("Invalid RSA Public Key.");
+        }
+
+        RSAParameters rsaParms = new RSAParameters()
+        {
+            Modulus = Base64Url.Decode(key.n),
+            Exponent  = Base64Url.Decode(key.e)
+        };
+
+        RSA rsa = RSA.Create();
+
+        try
+        {
+            rsa.ImportParameters(rsaParms);
+            return rsa;
+        }
+        catch
+        {
+            rsa?.Dispose();
+            throw;
+        }
     }
 }

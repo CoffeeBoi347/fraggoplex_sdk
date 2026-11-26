@@ -1,3 +1,4 @@
+
 using System;
 using System.Collections.Generic;
 using System.Security.Cryptography;
@@ -19,7 +20,20 @@ namespace Fraggoplex.SDK
         private const string BAD_TOKEN = "bad_token";
         private const string EXPIRED_TOKEN = "expired_token";
 
-        public static VerifyResult Verify(string token, string buildShaArg, string gameId, IList<KeyEntry> keys, long nowUnix)
+        private const long CLOCK_SKEW = 300;
+
+        private static readonly Dictionary<string, RSA> keyCache =
+            new Dictionary<string, RSA>();
+
+        private static readonly object keyCacheLock = new object();
+
+
+        public static VerifyResult Verify(
+            string token,
+            string buildShaArg,
+            string gameId,
+            IList<KeyEntry> keys,
+            long nowUnix)
         {
             try
             {
@@ -37,24 +51,35 @@ namespace Fraggoplex.SDK
                 if (parts.Length != 3)
                     return Fail(BAD_TOKEN);
 
-                if (string.IsNullOrWhiteSpace(parts[0]) || string.IsNullOrWhiteSpace(parts[1]) || string.IsNullOrWhiteSpace(parts[2]))
+                if (string.IsNullOrEmpty(parts[0]) ||
+                    string.IsNullOrEmpty(parts[1]) ||
+                    string.IsNullOrEmpty(parts[2]))
+                {
                     return Fail(BAD_TOKEN);
+                }
 
-                byte[] headerBytes;
-                byte[] claimsBytes;
-                byte[] signatureBytes;
+                byte[] headerBytes =
+                    Base64Url.Decode(parts[0]);
 
-                headerBytes = Base64Url.Decode(parts[0]);
-                claimsBytes = Base64Url.Decode(parts[1]);
-                signatureBytes = Base64Url.Decode(parts[2]);
+                byte[] claimsBytes =
+                    Base64Url.Decode(parts[1]);
 
-                // Parse and validate the JWT header
+                byte[] signatureBytes =
+                    Base64Url.Decode(parts[2]);
 
-                string headerJson = Encoding.UTF8.GetString(headerBytes);
-                TokenHeader header = JsonUtility.FromJson<TokenHeader>(headerJson);
+                string headerJson =
+                    Encoding.UTF8.GetString(headerBytes);
 
-                if (header == null || header.alg != "RS256" || header.typ != "FGT" || string.IsNullOrWhiteSpace(header.kid))
+                TokenHeader header =
+                    JsonUtility.FromJson<TokenHeader>(headerJson);
+
+                if (header == null ||
+                    header.alg != "RS256" ||
+                    header.typ != "FGT" ||
+                    string.IsNullOrWhiteSpace(header.kid))
+                {
                     return Fail(BAD_TOKEN);
+                }
 
                 if (keys == null || keys.Count == 0)
                     return Fail(BAD_TOKEN);
@@ -70,37 +95,49 @@ namespace Fraggoplex.SDK
                     }
                 }
 
-                if (selectedKey == null || string.IsNullOrWhiteSpace(selectedKey.n) || string.IsNullOrWhiteSpace(selectedKey.e))
+                if (selectedKey == null)
                     return Fail(BAD_TOKEN);
 
-                // Verify RSA Signature
+                byte[] data = Encoding.ASCII.GetBytes(
+                    parts[0] + "." + parts[1]
+                );
 
-                byte[] data = Encoding.ASCII.GetBytes(parts[0] + "." + parts[1]);
-                RSAParameters rsaParameters = new RSAParameters
+                RSA rsa = KeyFrom(selectedKey);
+
+                bool signatureValid;
+
+                lock (keyCacheLock)
                 {
-                    Modulus = Base64Url.Decode(selectedKey.n),
-                    Exponent = Base64Url.Decode(selectedKey.e)
-                };
-
-                using (RSA rsa = RSA.Create())
-                {
-                    rsa.ImportParameters(rsaParameters);
-
-                    bool signatureValid = rsa.VerifyData(data, signatureBytes, HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1);
-                    if (!signatureValid)
-                        return Fail(BAD_TOKEN);
+                    signatureValid = rsa.VerifyData(
+                        data,
+                        signatureBytes,
+                        HashAlgorithmName.SHA256,
+                        RSASignaturePadding.Pkcs1
+                    );
                 }
 
-                // Verify Payload
-
-                string claimJson = Encoding.UTF8.GetString(claimsBytes);
-                TokenClaims claims = JsonUtility.FromJson<TokenClaims>(claimJson);
-
-                if (claims == null || claims.v != 1 || claims.iss != "fraggoplex")
+                if (!signatureValid)
                     return Fail(BAD_TOKEN);
 
-                if ((decimal)nowUnix + 300 < claims.nbf || (decimal)nowUnix - 300 > claims.exp)
+
+                string claimsJson =
+                    Encoding.UTF8.GetString(claimsBytes);
+
+                TokenClaims claims =
+                    JsonUtility.FromJson<TokenClaims>(claimsJson);
+
+                if (claims == null ||
+                    claims.v != 1 ||
+                    claims.iss != "fraggoplex")
+                {
+                    return Fail(BAD_TOKEN);
+                }
+
+                if ((decimal)nowUnix + CLOCK_SKEW < claims.nbf ||
+                    (decimal)nowUnix - CLOCK_SKEW > claims.exp)
+                {
                     return Fail(EXPIRED_TOKEN);
+                }
 
                 if (!string.IsNullOrWhiteSpace(buildShaArg))
                 {
@@ -114,7 +151,8 @@ namespace Fraggoplex.SDK
                     }
                 }
 
-                if (string.IsNullOrEmpty(gameId) || claims.game_id != gameId)
+                if (string.IsNullOrWhiteSpace(gameId) ||
+                    claims.game_id != gameId)
                 {
                     return Fail(BAD_TOKEN);
                 }
@@ -126,13 +164,54 @@ namespace Fraggoplex.SDK
                     Claims = claims
                 };
             }
-
             catch (Exception)
             {
                 return Fail(BAD_TOKEN);
             }
         }
 
+        public static RSA KeyFrom(KeyEntry key)
+        {
+            if (key == null)
+                throw new ArgumentNullException(nameof(key));
+
+            if (string.IsNullOrWhiteSpace(key.kid) ||
+                string.IsNullOrWhiteSpace(key.n) ||
+                string.IsNullOrWhiteSpace(key.e))
+            {
+                throw new ArgumentException(
+                    "Invalid RSA public key."
+                );
+            }
+
+            lock (keyCacheLock)
+            {
+                if (keyCache.TryGetValue(key.kid, out RSA cachedKey))
+                    return cachedKey;
+
+                RSAParameters parameters = new RSAParameters
+                {
+                    Modulus = Base64Url.Decode(key.n),
+                    Exponent = Base64Url.Decode(key.e)
+                };
+
+                RSA rsa = RSA.Create();
+
+                try
+                {
+                    rsa.ImportParameters(parameters);
+
+                    keyCache.Add(key.kid, rsa);
+
+                    return rsa;
+                }
+                catch
+                {
+                    rsa.Dispose();
+                    throw;
+                }
+            }
+        }
 
         private static VerifyResult Fail(string reason)
         {
