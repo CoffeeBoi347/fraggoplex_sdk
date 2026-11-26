@@ -1,5 +1,6 @@
 namespace Fraggoplex.SDK
 {
+    [System.Serializable]
     public class TokenClaims
     {
         public int v;
