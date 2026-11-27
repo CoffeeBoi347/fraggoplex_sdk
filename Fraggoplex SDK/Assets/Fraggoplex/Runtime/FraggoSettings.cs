@@ -1,9 +1,13 @@
+
 using System.Collections.Generic;
 using UnityEngine;
 
 namespace Fraggoplex.SDK
 {
-    [CreateAssetMenu(fileName = "FraggoSettings", menuName = "Fraggoplex/SDK Settings")]
+    [CreateAssetMenu(
+        fileName = "FraggoSettings",
+        menuName = "Fraggoplex/SDK Settings"
+    )]
     public class FraggoSettings : ScriptableObject
     {
         [Header("Backend Config")]
@@ -13,19 +17,19 @@ namespace Fraggoplex.SDK
         public string gameId;
         public string gameSlug;
 
-        [Header("Public Key")]
-        public List<KeyEntry> keys = new List<KeyEntry> ();
+        [Header("Security")]
+        public List<KeyEntry> publicKeys = new List<KeyEntry>();
 
         [Header("Development")]
         public bool mockInEditor = true;
 
         [Header("Unlicensed Behaviour")]
         public UnlicensedBehaviour unlicensedBehaviour = UnlicensedBehaviour.Block;
+    }
 
-        public enum UnlicensedBehaviour
-        {
-            Block,
-            DemoMode
-        }
+    public enum UnlicensedBehaviour
+    {
+        Block,
+        DemoMode
     }
 }

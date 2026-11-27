@@ -22,12 +22,16 @@ namespace Fraggoplex.SDK
 
         private const long CLOCK_SKEW = 300;
 
-        private static readonly Dictionary<string, RSA> keyCache =
-            new Dictionary<string, RSA>();
+        private sealed class CachedKey
+        {
+            public string Modulus;
+            public string Exponent;
+            public RSA Rsa;
+        }
+
+        private static readonly Dictionary<string, CachedKey> keyCache = new Dictionary<string, CachedKey>();
 
         private static readonly object keyCacheLock = new object();
-
-
         public static VerifyResult Verify(
             string token,
             string buildShaArg,
@@ -58,14 +62,10 @@ namespace Fraggoplex.SDK
                     return Fail(BAD_TOKEN);
                 }
 
-                byte[] headerBytes =
-                    Base64Url.Decode(parts[0]);
+                byte[] headerBytes = Base64Url.Decode(parts[0]);
+                byte[] claimsBytes = Base64Url.Decode(parts[1]);
+                byte[] signatureBytes = Base64Url.Decode(parts[2]);
 
-                byte[] claimsBytes =
-                    Base64Url.Decode(parts[1]);
-
-                byte[] signatureBytes =
-                    Base64Url.Decode(parts[2]);
 
                 string headerJson =
                     Encoding.UTF8.GetString(headerBytes);
@@ -80,6 +80,7 @@ namespace Fraggoplex.SDK
                 {
                     return Fail(BAD_TOKEN);
                 }
+
 
                 if (keys == null || keys.Count == 0)
                     return Fail(BAD_TOKEN);
@@ -98,16 +99,17 @@ namespace Fraggoplex.SDK
                 if (selectedKey == null)
                     return Fail(BAD_TOKEN);
 
+
                 byte[] data = Encoding.ASCII.GetBytes(
                     parts[0] + "." + parts[1]
                 );
-
-                RSA rsa = KeyFrom(selectedKey);
 
                 bool signatureValid;
 
                 lock (keyCacheLock)
                 {
+                    RSA rsa = KeyFromInternal(selectedKey);
+
                     signatureValid = rsa.VerifyData(
                         data,
                         signatureBytes,
@@ -129,6 +131,20 @@ namespace Fraggoplex.SDK
                 if (claims == null ||
                     claims.v != 1 ||
                     claims.iss != "fraggoplex")
+                {
+                    return Fail(BAD_TOKEN);
+                }
+
+                if (string.IsNullOrWhiteSpace(claims.game_id) ||
+                    string.IsNullOrWhiteSpace(claims.player) ||
+                    string.IsNullOrWhiteSpace(claims.seat))
+                {
+                    return Fail(BAD_TOKEN);
+                }
+
+                if (claims.nbf <= 0 ||
+                    claims.exp <= 0 ||
+                    claims.exp <= claims.nbf)
                 {
                     return Fail(BAD_TOKEN);
                 }
@@ -169,7 +185,6 @@ namespace Fraggoplex.SDK
                 return Fail(BAD_TOKEN);
             }
         }
-
         public static RSA KeyFrom(KeyEntry key)
         {
             if (key == null)
@@ -186,30 +201,63 @@ namespace Fraggoplex.SDK
 
             lock (keyCacheLock)
             {
-                if (keyCache.TryGetValue(key.kid, out RSA cachedKey))
-                    return cachedKey;
+                return KeyFromInternal(key);
+            }
+        }
 
-                RSAParameters parameters = new RSAParameters
+        private static RSA KeyFromInternal(KeyEntry key)
+        {
+            if (keyCache.TryGetValue(key.kid, out CachedKey cached))
+            {
+                if (cached.Modulus != key.n ||
+                    cached.Exponent != key.e)
                 {
-                    Modulus = Base64Url.Decode(key.n),
-                    Exponent = Base64Url.Decode(key.e)
-                };
-
-                RSA rsa = RSA.Create();
-
-                try
-                {
-                    rsa.ImportParameters(parameters);
-
-                    keyCache.Add(key.kid, rsa);
-
-                    return rsa;
+                    throw new CryptographicException(
+                        "Key ID reused with different key material."
+                    );
                 }
-                catch
+
+                return cached.Rsa;
+            }
+
+            RSAParameters parameters = new RSAParameters
+            {
+                Modulus = Base64Url.Decode(key.n),
+                Exponent = Base64Url.Decode(key.e)
+            };
+
+            RSA rsa = RSA.Create();
+
+            try
+            {
+                rsa.ImportParameters(parameters);
+
+                keyCache.Add(key.kid, new CachedKey
                 {
-                    rsa.Dispose();
-                    throw;
+                    Modulus = key.n,
+                    Exponent = key.e,
+                    Rsa = rsa
+                });
+
+                return rsa;
+            }
+            catch
+            {
+                rsa.Dispose();
+                throw;
+            }
+        }
+
+        public static void ClearKeyCache()
+        {
+            lock (keyCacheLock)
+            {
+                foreach (CachedKey cached in keyCache.Values)
+                {
+                    cached.Rsa.Dispose();
                 }
+
+                keyCache.Clear();
             }
         }
 
